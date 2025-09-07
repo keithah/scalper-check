@@ -1,0 +1,5 @@
+timestamp,section,row,price_per_ticket,total_for_2,quantity,seller,site,checkout_url
+2025-09-07 00:20:02,Right,6,269,538,2,vividseats,SeatPick,https://vivid-seats.pxf.io/c/3289547/952533/12730?u=https://www.vividseats.com/r/production/5644998?showDetails=VB13466001947&qty=2
+2025-09-07 00:20:02,Left,7,277,554,2,vividseats,SeatPick,https://vivid-seats.pxf.io/c/3289547/952533/12730?u=https://www.vividseats.com/r/production/5644998?showDetails=VB13473905591&qty=2
+2025-09-07 00:20:02,Front Right,,293,586,2,vgg,SeatPick,https://viagogo.prf.hn/click/camref:1101lrBs2/pubref:gggggg/destination:https%3A//checkout.viagogo.com/secure/buy/Initialise%3FlistingId%3D10193418371%26qty%3D2
+2025-09-07 00:20:02,Front Left,,328,656,2,vgg,SeatPick,https://viagogo.prf.hn/click/camref:1101lrBs2/pubref:gggggg/destination:https%3A//checkout.viagogo.com/secure/buy/Initialise%3FlistingId%3D10203937008%26qty%3D2

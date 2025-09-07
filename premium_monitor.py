@@ -556,30 +556,37 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
             print("No premium tickets found")
             return
         
-        # STRICT filtering to prevent false alerts - especially from Viagogo
+        # STRICT filtering - ONLY verified prices
         test_tickets = []
         for t in tickets:
-            if t['price'] < 400:
-                # Only include in test notifications if:
-                # 1. Price is verified AND accurate, OR
-                # 2. It's from VividSeats (which we verify well) AND the price makes sense
-                if (t.get('verified') and t.get('accurate')) or \
-                   ('vividseats' in t.get('seller', '').lower() and t.get('verified')):
-                    test_tickets.append(t)
-                else:
-                    print(f"   🚫 FILTERING OUT unverified test notification: {t['section']} ${t['price']} via {t['seller']} (verified:{t.get('verified')}, accurate:{t.get('accurate')})")
+            # Must be verified to be included
+            if not t.get('verified'):
+                continue
+                
+            # Use final verified price for filtering
+            final_price = t.get('final_price', t['price'])
+            
+            if final_price < 400:
+                test_tickets.append(t)
+                print(f"   ✅ Including verified test notification: {t['section']} final=${final_price} via {t['seller']}")
+            else:
+                print(f"   🚫 Verified but too expensive for test: {t['section']} final=${final_price} via {t['seller']}")
         
-        # EXTREMELY conservative filtering for urgent alerts - NO false alarms allowed
+        # STRICT urgent alerts - ONLY verified prices under $300
         immediate_tickets = []
         for t in tickets:
-            if t['price'] < 300:
-                # ONLY include if price is verified AND accurate
-                # NO exceptions for any seller - must be price verified
-                if t.get('verified') and t.get('accurate'):
-                    immediate_tickets.append(t)
-                    print(f"   ✅ Including verified urgent alert: {t['section']} ${t['price']} via {t['seller']}")
-                else:
-                    print(f"   🚫 BLOCKING unverified urgent alert: {t['section']} ${t['price']} via {t['seller']} (verified:{t.get('verified')}, accurate:{t.get('accurate')})")
+            # Must be verified
+            if not t.get('verified'):
+                continue
+                
+            # Use final verified price
+            final_price = t.get('final_price', t['price'])
+            
+            if final_price < 300:
+                immediate_tickets.append(t)
+                print(f"   🚨 Including verified urgent alert: {t['section']} final=${final_price} via {t['seller']}")
+            elif final_price < 400:
+                print(f"   📊 Verified but not urgent: {t['section']} final=${final_price} via {t['seller']}")
         
         print(f"📊 Found {len(tickets)} premium tickets")
         print(f"📧 Test range (<$400): {len(test_tickets)} tickets")  
