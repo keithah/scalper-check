@@ -60,8 +60,10 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
                 splits = listing.get('splits', [])
                 
                 # Must be able to buy 2 tickets together
-                # This means either quantity >= 2 AND (no splits OR splits contains 2)
-                can_buy_two_together = quantity >= 2 and (not splits or 2 in splits or max(splits) >= 2)
+                # This means quantity >= 2 AND either (no splits OR splits contains 2 or higher)
+                has_quantity = quantity >= 2
+                allows_two = not splits or any(s >= 2 for s in splits)
+                can_buy_two_together = has_quantity and allows_two
                 
                 if not can_buy_two_together:
                     print(f"   Skipping {listing.get('section')} ${listing.get('price')} - quantity: {quantity}, splits: {splits} (need 2 together)")
@@ -520,8 +522,17 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
             print("No premium tickets found")
             return
         
-        # Filter tickets by price ranges - but be conservative about unverified tickets
-        test_tickets = [t for t in tickets if t['price'] < 400]  # Test notifications for <$400
+        # Filter tickets by price ranges - be conservative about unverified tickets for ALL notifications
+        test_tickets = []
+        for t in tickets:
+            if t['price'] < 400:
+                # Only include in test notifications if:
+                # 1. Price is verified, OR
+                # 2. It's from VividSeats (which we verify well and trust)
+                if t.get('verified') or 'vividseats' in t.get('seller', '').lower():
+                    test_tickets.append(t)
+                else:
+                    print(f"   Skipping unverified test notification: {t['section']} ${t['price']} via {t['seller']}")
         
         # For urgent alerts, only include verified tickets OR tickets from trusted sellers
         immediate_tickets = []
