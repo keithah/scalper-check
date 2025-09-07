@@ -24,7 +24,8 @@ class SeatPickMonitor:
         self.email_pass = os.environ.get('EMAIL_PASS')
         self.email_to = os.environ.get('EMAIL_TO')
         self.smtp_server = os.environ.get('SMTP_SERVER', 'smtp.gmail.com')
-        self.smtp_port = int(os.environ.get('SMTP_PORT', '587'))
+        smtp_port_str = os.environ.get('SMTP_PORT', '587')
+        self.smtp_port = int(smtp_port_str) if smtp_port_str and smtp_port_str.strip() else 587
         
         # MailerSend settings
         self.mailersend_api_key = os.environ.get('MAILERSEND_API_KEY')
