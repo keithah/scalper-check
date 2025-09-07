@@ -529,11 +529,10 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
             if t['price'] < 300:
                 # Only alert if:
                 # 1. Price is verified as accurate, OR
-                # 2. It's from VividSeats (which we verify well), OR  
-                # 3. The unverified price is significantly below threshold ($200)
+                # 2. It's from VividSeats (which we verify well and trust)
+                # NO unverified tickets from Viagogo/TicketNetwork in urgent alerts
                 if (t.get('verified') and t.get('accurate')) or \
-                   'vividseats' in t.get('seller', '').lower() or \
-                   t['price'] < 200:
+                   'vividseats' in t.get('seller', '').lower():
                     immediate_tickets.append(t)
                 else:
                     print(f"   Skipping unverified urgent alert: {t['section']} ${t['price']} via {t['seller']}")
