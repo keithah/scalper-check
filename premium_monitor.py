@@ -134,18 +134,21 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
                 
                 try:
                     page = await context.new_page()
+                    print(f"   🔍 Navigating to {seller} page for verification...")
                     await page.goto(deeplink, wait_until='domcontentloaded', timeout=20000)
                     await page.wait_for_timeout(3000)
                     
                     # Extract FINAL price with fees
                     final_price = await self.extract_final_price(page, seller)
                     
-                    print(f"   Price extraction result: SeatPick=${seatpick_price}, Final=${final_price}")
+                    print(f"   📊 Price extraction result for {section} via {seller}:")
+                    print(f"      SeatPick shows: ${seatpick_price}")
+                    print(f"      Extracted price: ${final_price}")
                     
                     # Reject extracted price if it's suspiciously lower than SeatPick price
                     # For premium tickets, final price should NEVER be less than 80% of SeatPick price
                     if final_price and final_price < (seatpick_price * 0.8):
-                        print(f"   ⚠️  Rejecting suspiciously low final price ${final_price} vs SeatPick ${seatpick_price} - likely extraction error")
+                        print(f"   🚨 SAFETY REJECTION: Final price ${final_price} vs SeatPick ${seatpick_price} - difference {((seatpick_price - final_price) / seatpick_price * 100):.1f}% (extraction error)")
                         final_price = None
                     
                     if final_price:
@@ -155,8 +158,10 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
                         # Additional safety check: Never use extracted price if it's way too low
                         filter_price = final_price
                         if seatpick_price > 400 and final_price < 300:
-                            print(f"   🛡️  Safety override: Using SeatPick ${seatpick_price} instead of extracted ${final_price} (too low)")
+                            print(f"   🛡️  SAFETY OVERRIDE: Using SeatPick ${seatpick_price} instead of extracted ${final_price} (suspicious price)")
                             filter_price = seatpick_price
+                        
+                        print(f"   ✅ VERIFIED: {section} ${filter_price} ({'accurate' if accurate else 'price different'}) - diff: ${price_diff:+.2f}")
                             
                         verified.append({
                             'section': section,
@@ -171,6 +176,7 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
                             'accurate': accurate
                         })
                     else:
+                        print(f"   ❓ UNVERIFIED: {section} ${seatpick_price} via {seller} - using SeatPick price")
                         # Fallback to SeatPick price if can't verify
                         verified.append({
                             'section': section,
@@ -187,7 +193,8 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
                     await page.close()
                     
                 except Exception as e:
-                    print(f"   Error verifying {section}: {str(e)[:50]}")
+                    print(f"   ❌ ERROR verifying {section} via {seller}: {str(e)[:100]}")
+                    print(f"      Adding as unverified ticket with SeatPick price ${seatpick_price}")
                     # Add unverified listing on error
                     verified.append({
                         'section': section,
@@ -274,14 +281,12 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
             elif 'vgg' in seller.lower() or 'viagogo' in seller.lower() or 'te' in seller.lower():
                 print(f"      Extracting from Viagogo/Events365 page...")
                 
-                # Viagogo-specific patterns (more aggressive)
+                # Much more conservative Viagogo patterns - only look for clear checkout totals
                 patterns = [
-                    r'(?:Total|total|TOTAL)[\s\:]*\$(\d+(?:\.\d{2})?)',
-                    r'(?:You Pay|You pay|YOU PAY)[\s\:]*\$(\d+(?:\.\d{2})?)',
-                    r'(?:Final Price|Final price|FINAL PRICE)[\s\:]*\$(\d+(?:\.\d{2})?)',
-                    r'(?:Order Total|ORDER TOTAL)[\s\:]*\$(\d+(?:\.\d{2})?)',
-                    r'\$(\d+(?:\.\d{2})?)\s*(?:total|Total|TOTAL)',
-                    r'\$(\d{3,4}(?:\.\d{2})?)\s*(?:USD|usd)'
+                    r'(?:Order Total|ORDER TOTAL|Grand Total|GRAND TOTAL)[\s\:]*\$(\d{3,4}(?:\.\d{2})?)',
+                    r'(?:Total Cost|TOTAL COST|Total Price|TOTAL PRICE)[\s\:]*\$(\d{3,4}(?:\.\d{2})?)',
+                    r'(?:You Pay|You pay|YOU PAY)[\s\:]*\$(\d{3,4}(?:\.\d{2})?)',
+                    r'(?:Amount Due|AMOUNT DUE|Final Amount|FINAL AMOUNT)[\s\:]*\$(\d{3,4}(?:\.\d{2})?)'
                 ]
                 
                 for i, pattern in enumerate(patterns):
@@ -290,20 +295,14 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
                         for match in matches:
                             price = float(match)
                             print(f"      Viagogo pattern {i+1} found: ${price}")
-                            if 150 <= price <= 1000:  # Reasonable range for Viagogo
+                            # Much more conservative price range - Viagogo premiums should be $400+
+                            if 400 <= price <= 1000:
                                 return price
+                            elif price < 400:
+                                print(f"      Rejecting Viagogo price ${price} - too low for premium tickets")
                 
-                # If no specific patterns work, try to find the highest reasonable price
-                all_matches = re.findall(r'\$(\d{2,4}(?:\.\d{2})?)', content)
-                if all_matches:
-                    prices = [float(m) for m in all_matches]
-                    valid_prices = [p for p in prices if 200 <= p <= 800]
-                    if valid_prices:
-                        result = max(valid_prices)
-                        print(f"      Viagogo fallback found: ${result}")
-                        return result
-                
-                print(f"      No reliable Viagogo price found")
+                # NO fallback patterns - if we can't find a clear total, don't guess
+                print(f"      No reliable Viagogo checkout total found - using SeatPick price")
                 return None
             
             # Generic extraction for other sellers
@@ -522,31 +521,30 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
             print("No premium tickets found")
             return
         
-        # Filter tickets by price ranges - be conservative about unverified tickets for ALL notifications
+        # STRICT filtering to prevent false alerts - especially from Viagogo
         test_tickets = []
         for t in tickets:
             if t['price'] < 400:
                 # Only include in test notifications if:
-                # 1. Price is verified, OR
-                # 2. It's from VividSeats (which we verify well and trust)
-                if t.get('verified') or 'vividseats' in t.get('seller', '').lower():
+                # 1. Price is verified AND accurate, OR
+                # 2. It's from VividSeats (which we verify well) AND the price makes sense
+                if (t.get('verified') and t.get('accurate')) or \
+                   ('vividseats' in t.get('seller', '').lower() and t.get('verified')):
                     test_tickets.append(t)
                 else:
-                    print(f"   Skipping unverified test notification: {t['section']} ${t['price']} via {t['seller']}")
+                    print(f"   🚫 FILTERING OUT unverified test notification: {t['section']} ${t['price']} via {t['seller']} (verified:{t.get('verified')}, accurate:{t.get('accurate')})")
         
-        # For urgent alerts, only include verified tickets OR tickets from trusted sellers
+        # EXTREMELY conservative filtering for urgent alerts - NO false alarms allowed
         immediate_tickets = []
         for t in tickets:
             if t['price'] < 300:
-                # Only alert if:
-                # 1. Price is verified as accurate, OR
-                # 2. It's from VividSeats (which we verify well and trust)
-                # NO unverified tickets from Viagogo/TicketNetwork in urgent alerts
-                if (t.get('verified') and t.get('accurate')) or \
-                   'vividseats' in t.get('seller', '').lower():
+                # ONLY include if price is verified AND accurate
+                # NO exceptions for any seller - must be price verified
+                if t.get('verified') and t.get('accurate'):
                     immediate_tickets.append(t)
+                    print(f"   ✅ Including verified urgent alert: {t['section']} ${t['price']} via {t['seller']}")
                 else:
-                    print(f"   Skipping unverified urgent alert: {t['section']} ${t['price']} via {t['seller']}")
+                    print(f"   🚫 BLOCKING unverified urgent alert: {t['section']} ${t['price']} via {t['seller']} (verified:{t.get('verified')}, accurate:{t.get('accurate')})")
         
         print(f"📊 Found {len(tickets)} premium tickets")
         print(f"📧 Test range (<$400): {len(test_tickets)} tickets")  
