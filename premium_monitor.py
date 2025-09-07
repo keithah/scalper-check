@@ -141,18 +141,25 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
                     print(f"   Price extraction result: SeatPick=${seatpick_price}, Final=${final_price}")
                     
                     # Reject extracted price if it's suspiciously lower than SeatPick price
-                    if final_price and final_price < (seatpick_price * 0.5):
-                        print(f"   ⚠️  Rejecting suspiciously low final price ${final_price} vs SeatPick ${seatpick_price}")
+                    # For premium tickets, final price should NEVER be less than 80% of SeatPick price
+                    if final_price and final_price < (seatpick_price * 0.8):
+                        print(f"   ⚠️  Rejecting suspiciously low final price ${final_price} vs SeatPick ${seatpick_price} - likely extraction error")
                         final_price = None
                     
                     if final_price:
                         price_diff = final_price - seatpick_price
                         accurate = abs(price_diff) <= 10
                         
+                        # Additional safety check: Never use extracted price if it's way too low
+                        filter_price = final_price
+                        if seatpick_price > 400 and final_price < 300:
+                            print(f"   🛡️  Safety override: Using SeatPick ${seatpick_price} instead of extracted ${final_price} (too low)")
+                            filter_price = seatpick_price
+                            
                         verified.append({
                             'section': section,
                             'row': row,
-                            'price': final_price,  # Use final price for filtering
+                            'price': filter_price,  # Use safe price for filtering
                             'seller': seller,
                             'verified': True,
                             'final_price': final_price,
@@ -237,27 +244,29 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
             
             # TicketNetwork specific extraction  
             elif 'tn' in seller.lower() or 'ticketnetwork' in seller.lower():
-                # Look for final checkout total
+                # TicketNetwork often shows misleading prices - be very conservative
+                print(f"      Extracting from TicketNetwork page...")
+                
+                # Only look for very specific final total patterns
                 patterns = [
-                    r'(?:Order Total|Total|Final Total|Grand Total).*?\$(\d+(?:\.\d{2})?)',
-                    r'\$(\d+(?:\.\d{2})?)\s*(?:Total|total|TOTAL)',
-                    r'(?:You Pay|Total Price).*?\$(\d+(?:\.\d{2})?)'
+                    r'(?:Order Total|Grand Total|Final Total)[\s\$]*(\d{3,4}(?:\.\d{2})?)',
+                    r'(?:Total Due|Amount Due|You Pay)[\s\$]*(\d{3,4}(?:\.\d{2})?)',
+                    r'(?:Total Price|Final Price)[\s\$]*(\d{3,4}(?:\.\d{2})?)'
                 ]
                 
-                for pattern in patterns:
+                for i, pattern in enumerate(patterns):
                     matches = re.findall(pattern, content, re.IGNORECASE)
                     if matches:
-                        price = float(matches[0])
-                        if price >= 200:  # TicketNetwork prices should be reasonable
-                            return price
+                        for match in matches:
+                            price = float(match)
+                            print(f"      TicketNetwork pattern {i+1} found: ${price}")
+                            # TicketNetwork final prices should be higher than SeatPick, not lower
+                            if price >= 400:  # Conservative minimum for TicketNetwork
+                                return price
                 
-                # Fallback: find highest reasonable price
-                matches = re.findall(r'\$(\d{3,4}(?:\.\d{2})?)', content)
-                if matches:
-                    prices = [float(m) for m in matches]
-                    valid_prices = [p for p in prices if 400 <= p <= 2000]  # Higher range for TicketNetwork
-                    if valid_prices:
-                        return max(valid_prices)
+                # If no good patterns found, return None (use SeatPick price)
+                print(f"      No reliable TicketNetwork price found, using SeatPick price")
+                return None
             
             # Viagogo specific extraction
             elif 'vgg' in seller.lower() or 'viagogo' in seller.lower() or 'te' in seller.lower():
