@@ -124,6 +124,8 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
                     # Extract FINAL price with fees
                     final_price = await self.extract_final_price(page, seller)
                     
+                    print(f"   Price extraction result: SeatPick=${seatpick_price}, Final=${final_price}")
+                    
                     if final_price:
                         price_diff = final_price - seatpick_price
                         accurate = abs(price_diff) <= 10
@@ -189,19 +191,30 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
             
             # VividSeats specific extraction
             if 'vivid' in seller.lower():
-                # Look for "Estimated fees included" price
+                # Look for "Estimated fees included" price first
                 match = re.search(r'\$(\d+(?:\.\d{2})?)\s*(?:ea|each)?.*?(?:Estimated fees included|est)', content, re.IGNORECASE)
                 if match:
-                    return float(match.group(1))
+                    price = float(match.group(1))
+                    if price >= 100:  # Sanity check
+                        return price
                 
-                # Look for total price patterns
-                matches = re.findall(r'\$(\d{3,4}(?:\.\d{2})?)', content)
+                # Look for all reasonable price patterns (2+ digits)
+                matches = re.findall(r'\$(\d{2,4}(?:\.\d{2})?)', content)
                 if matches:
                     prices = [float(m) for m in matches]
                     # Return highest reasonable price (likely the total with fees)
-                    valid_prices = [p for p in prices if 200 <= p <= 1000]
+                    valid_prices = [p for p in prices if 100 <= p <= 1000]
                     if valid_prices:
                         return max(valid_prices)
+                
+                # Fallback: look for any price pattern but be more selective
+                all_matches = re.findall(r'\$(\d+(?:\.\d{2})?)', content)
+                if all_matches:
+                    prices = [float(m) for m in all_matches]
+                    reasonable_prices = [p for p in prices if 50 <= p <= 1000]
+                    if reasonable_prices:
+                        # Return the highest price that's not suspiciously low
+                        return max(reasonable_prices)
             
             # Viagogo specific extraction
             elif 'vgg' in seller or 'viagogo' in seller.lower():
@@ -230,15 +243,25 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
                 for pattern in patterns:
                     matches = re.findall(pattern, content, re.IGNORECASE)
                     if matches:
-                        return float(matches[0])
+                        price = float(matches[0])
+                        if price >= 50:  # Sanity check
+                            return price
                 
-                # Fallback: find highest reasonable price
-                matches = re.findall(r'\$(\d{3,4}(?:\.\d{2})?)', content)
+                # Fallback: find highest reasonable price (relaxed minimum)
+                matches = re.findall(r'\$(\d{2,4}(?:\.\d{2})?)', content)
                 if matches:
                     prices = [float(m) for m in matches]
-                    valid_prices = [p for p in prices if 200 <= p <= 1000]
+                    valid_prices = [p for p in prices if 100 <= p <= 1000]
                     if valid_prices:
                         return max(valid_prices)
+                
+                # Last resort: any price over $50
+                all_matches = re.findall(r'\$(\d+(?:\.\d{2})?)', content)
+                if all_matches:
+                    prices = [float(m) for m in all_matches]
+                    reasonable_prices = [p for p in prices if 50 <= p <= 1000]
+                    if reasonable_prices:
+                        return max(reasonable_prices)
             
         except Exception as e:
             print(f"      Error extracting price: {str(e)[:50]}")
@@ -330,10 +353,13 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
                 else:
                     verification_icon = "⚠️"
                     seatpick_price = ticket.get('seatpick_price', ticket['price'])
-                    price_display = f"${ticket['final_price']:.0f} (listed: ${seatpick_price})"
+                    price_display = f"${ticket['final_price']:.0f} (listed: ${seatpick_price:.0f})"
             else:
                 verification_icon = "❓"
-                price_display = f"${ticket['price']}"
+                price_display = f"${ticket['price']:.0f}"
+            
+            # Debug logging for price issues
+            print(f"   DEBUG: {ticket['section']} - price={ticket.get('price')}, final_price={ticket.get('final_price')}, display='{price_display}'")
             
             # Buy button
             if ticket.get('checkout_link'):

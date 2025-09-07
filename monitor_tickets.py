@@ -30,7 +30,7 @@ class SeatPickMonitor:
         # MailerSend settings
         self.mailersend_api_key = os.environ.get('MAILERSEND_API_KEY')
         self.mailersend_from_email = os.environ.get('MAILERSEND_FROM_EMAIL', 'notifications@ferry-notifier.app')
-        self.mailersend_from_name = os.environ.get('MAILERSEND_FROM_NAME', 'SeatPick Monitor')
+        self.mailersend_from_name = os.environ.get('MAILERSEND_FROM_NAME', 'Scalper Check')
         
         # SimplePush settings
         self.simplepush_key = os.environ.get('SIMPLEPUSH_KEY')
