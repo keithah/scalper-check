@@ -270,27 +270,39 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
             
             # Viagogo specific extraction
             elif 'vgg' in seller.lower() or 'viagogo' in seller.lower() or 'te' in seller.lower():
-                # Look for total price patterns
+                print(f"      Extracting from Viagogo/Events365 page...")
+                
+                # Viagogo-specific patterns (more aggressive)
                 patterns = [
-                    r'(?:Total|total).*?\$(\d+(?:\.\d{2})?)',
-                    r'(?:You Pay|Final Price).*?\$(\d+(?:\.\d{2})?)',
-                    r'\$(\d+(?:\.\d{2})?)\s*(?:total|Total)'
+                    r'(?:Total|total|TOTAL)[\s\:]*\$(\d+(?:\.\d{2})?)',
+                    r'(?:You Pay|You pay|YOU PAY)[\s\:]*\$(\d+(?:\.\d{2})?)',
+                    r'(?:Final Price|Final price|FINAL PRICE)[\s\:]*\$(\d+(?:\.\d{2})?)',
+                    r'(?:Order Total|ORDER TOTAL)[\s\:]*\$(\d+(?:\.\d{2})?)',
+                    r'\$(\d+(?:\.\d{2})?)\s*(?:total|Total|TOTAL)',
+                    r'\$(\d{3,4}(?:\.\d{2})?)\s*(?:USD|usd)'
                 ]
                 
-                for pattern in patterns:
+                for i, pattern in enumerate(patterns):
                     matches = re.findall(pattern, content, re.IGNORECASE)
                     if matches:
-                        price = float(matches[0])
-                        if price >= 200:  # Reasonable minimum
-                            return price
-                    
-                # Fallback to highest reasonable price
-                matches = re.findall(r'\$(\d{2,4}(?:\.\d{2})?)', content)
-                if matches:
-                    prices = [float(m) for m in matches]
-                    valid_prices = [p for p in prices if 250 <= p <= 1000]
+                        for match in matches:
+                            price = float(match)
+                            print(f"      Viagogo pattern {i+1} found: ${price}")
+                            if 150 <= price <= 1000:  # Reasonable range for Viagogo
+                                return price
+                
+                # If no specific patterns work, try to find the highest reasonable price
+                all_matches = re.findall(r'\$(\d{2,4}(?:\.\d{2})?)', content)
+                if all_matches:
+                    prices = [float(m) for m in all_matches]
+                    valid_prices = [p for p in prices if 200 <= p <= 800]
                     if valid_prices:
-                        return max(valid_prices)
+                        result = max(valid_prices)
+                        print(f"      Viagogo fallback found: ${result}")
+                        return result
+                
+                print(f"      No reliable Viagogo price found")
+                return None
             
             # Generic extraction for other sellers
             else:
@@ -508,9 +520,23 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
             print("No premium tickets found")
             return
         
-        # Filter tickets by price ranges
+        # Filter tickets by price ranges - but be conservative about unverified tickets
         test_tickets = [t for t in tickets if t['price'] < 400]  # Test notifications for <$400
-        immediate_tickets = [t for t in tickets if t['price'] < 300]  # Immediate alerts for <$300
+        
+        # For urgent alerts, only include verified tickets OR tickets from trusted sellers
+        immediate_tickets = []
+        for t in tickets:
+            if t['price'] < 300:
+                # Only alert if:
+                # 1. Price is verified as accurate, OR
+                # 2. It's from VividSeats (which we verify well), OR  
+                # 3. The unverified price is significantly below threshold ($200)
+                if (t.get('verified') and t.get('accurate')) or \
+                   'vividseats' in t.get('seller', '').lower() or \
+                   t['price'] < 200:
+                    immediate_tickets.append(t)
+                else:
+                    print(f"   Skipping unverified urgent alert: {t['section']} ${t['price']} via {t['seller']}")
         
         print(f"📊 Found {len(tickets)} premium tickets")
         print(f"📧 Test range (<$400): {len(test_tickets)} tickets")  
