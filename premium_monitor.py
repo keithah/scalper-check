@@ -5,7 +5,9 @@ import sys
 from datetime import datetime
 import re
 import aiohttp
-from playwright.async_api import async_playwright
+from rebrowser_playwright.async_api import async_playwright
+from camoufox.async_api import AsyncCamoufox
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 # Import notification functionality from original monitor
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -17,7 +19,199 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
         self.event_id = "366607"
         self.base_url = "https://seatpick.com"
         self.api_url = f"https://seatpick.com/api/proxy/4/events/{self.event_id}/listings"
+    
+    def sanitize_checkout_url(self, url):
+        """Remove tracking parameters from checkout URLs while keeping essential params"""
+        if not url:
+            return url
         
+        # For VividSeats URLs (through pxf.io tracking)
+        if 'vivid-seats.pxf.io' in url or 'vividseats.pxf.io' in url:
+            parsed = urlparse(url)
+            params = parse_qs(parsed.query)
+            if 'u' in params:
+                actual_url = params['u'][0]
+                parsed_actual = urlparse(actual_url)
+                actual_params = parse_qs(parsed_actual.query)
+                clean_params = {}
+                if 'showDetails' in actual_params:
+                    clean_params['showDetails'] = actual_params['showDetails'][0]
+                if 'qty' in actual_params:
+                    clean_params['qty'] = actual_params['qty'][0]
+                
+                return urlunparse((
+                    parsed_actual.scheme,
+                    parsed_actual.netloc,
+                    parsed_actual.path,
+                    '',
+                    urlencode(clean_params),
+                    ''
+                ))
+        
+        # For Viagogo URLs (through prf.hn tracking)
+        elif 'viagogo.prf.hn' in url:
+            if 'destination:' in url:
+                dest_start = url.find('destination:') + len('destination:')
+                actual_url = url[dest_start:]
+                import urllib.parse
+                actual_url = urllib.parse.unquote(actual_url)
+                return actual_url
+        
+        # For TicketNetwork URLs (through lusg.net tracking)
+        elif 'ticketnetwork.lusg.net' in url:
+            parsed = urlparse(url)
+            params = parse_qs(parsed.query)
+            if 'u' in params:
+                actual_url = params['u'][0]
+                parsed_actual = urlparse(actual_url)
+                actual_params = parse_qs(parsed_actual.query)
+                clean_params = {}
+                if 'ticketGroupId' in actual_params:
+                    clean_params['ticketGroupId'] = actual_params['ticketGroupId'][0]
+                
+                return urlunparse((
+                    parsed_actual.scheme,
+                    parsed_actual.netloc,
+                    parsed_actual.path,
+                    '',
+                    urlencode(clean_params),
+                    ''
+                ))
+        
+        # For direct URLs, remove common tracking parameters
+        else:
+            parsed = urlparse(url)
+            params = parse_qs(parsed.query)
+            
+            tracking_params = [
+                'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
+                'fbclid', 'gclid', 'msclkid', 'ref', 'referrer', 'source',
+                'camref', 'pubref', 'clickid', 'affid', 'affiliate'
+            ]
+            
+            clean_params = {k: v[0] for k, v in params.items() 
+                           if k.lower() not in tracking_params}
+            
+            return urlunparse((
+                parsed.scheme,
+                parsed.netloc,
+                parsed.path,
+                '',
+                urlencode(clean_params) if clean_params else '',
+                ''
+            ))
+        
+        return url
+    
+    async def scrape_tickets_detailed(self):
+        """Fetch and verify tickets with final prices including all fees"""
+        try:
+            print("🔍 Fetching tickets from SeatPick API...")
+            
+            # Fetch from SeatPick API
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+                'Accept': 'application/json',
+                'Referer': f'{self.base_url}/atmosphere-morrison-red-rocks-amphitheatre-19-09-2025-tickets/event/{self.event_id}'
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(self.api_url, headers=headers) as response:
+                    if response.status != 200:
+                        print("❌ Failed to fetch listings")
+                        return []
+                        
+                    data = await response.json()
+            
+            # Filter for desired sections only (NO GA) and quantity >= 2
+            filtered = []
+            for listing in data.get('listings', []):
+                if listing.get('section') not in self.desired_sections:
+                    continue
+                
+                # STRICT REQUIREMENT: Must have exactly 2 tickets available together (side by side)
+                quantity = listing.get('quantity', 1)
+                splits = listing.get('splits', [])
+                
+                # Only accept if:
+                # 1. Quantity is at least 2 (can buy 2+ tickets)
+                # 2. Either no splits specified OR splits explicitly allows 2
+                # 3. We specifically want 2 tickets, not 1, not 3+ (unless they allow splits of 2)
+                has_two_available = quantity >= 2
+                
+                # Check if splits allow exactly 2 (or if no splits specified, assume ok)
+                if splits:
+                    # If splits are specified, 2 must be in the list
+                    allows_exactly_two = 2 in splits
+                else:
+                    # No splits specified means any quantity up to max is allowed
+                    allows_exactly_two = True
+                
+                can_buy_two_together = has_two_available and allows_exactly_two
+                
+                if not can_buy_two_together:
+                    print(f"   ❌ Skipping single ticket: {listing.get('section')} ${listing.get('price')} - qty:{quantity}, splits:{splits}")
+                    continue
+                
+                # Extract details
+                section = listing.get('section')
+                row = listing.get('row', 'General')
+                seatpick_price = listing.get('price', 0)
+                seller = listing.get('seller', '')
+                deeplink = listing.get('deepLink', '')
+                
+                if not deeplink:
+                    # Skip if no checkout link
+                    filtered.append({
+                        'section': section,
+                        'row': row,
+                        'price': seatpick_price,
+                        'seller': seller,
+                        'verified': False,
+                        'final_price': seatpick_price,
+                        'price_diff': 0,
+                        'checkout_link': '',
+                        'accurate': True
+                    })
+                    continue
+                
+                print(f"   ✅ {section} ${seatpick_price} via {seller} (qty: {quantity})")
+                filtered.append({
+                    'section': section,
+                    'row': row,
+                    'price': seatpick_price,
+                    'seller': seller,
+                    'deeplink': deeplink,  # Keep original for verification
+                    'quantity': quantity,
+                    'splits': splits
+                })
+            
+            print(f"📊 Found {len(filtered)} tickets in premium sections")
+            
+            # Verify prices with fees for tickets under $500 (to catch misleading pricing)
+            verified_tickets = []
+            if filtered:
+                print("🔍 Verifying final prices with all fees...")
+                verified_tickets = await self.verify_final_prices(filtered[:20])  # Limit to avoid rate limiting
+            
+            # DISABLED: SeatGeek integration
+            # try:
+            #     print("🦊 Checking SeatGeek for Reserved Left/Center sections...")
+            #     seatgeek_tickets = await self.scrape_seatgeek_tickets()
+            #     if seatgeek_tickets:
+            #         verified_tickets.extend(seatgeek_tickets)
+            #         print(f"🎫 Added {len(seatgeek_tickets)} SeatGeek tickets to results")
+            #     else:
+            #         print("🦊 SeatGeek: No target section tickets found")
+            # except Exception as e:
+            #     print(f"🦊 SeatGeek integration error: {e}")
+            
+            return verified_tickets
+            
+        except Exception as e:
+            print(f"❌ Error in scrape_tickets_detailed: {e}")
+            return []
+
         # Your desired sections (NO GA)
         self.desired_sections = [
             "Center",
@@ -26,7 +220,10 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
             "Front Right",
             "Left",
             "Reserved Seating",
-            "Right"
+            "Right",
+            # SeatGeek specific sections
+            "Reserved Left",
+            "Reserved Center"
         ]
     
     async def scrape_tickets_detailed(self):
@@ -105,6 +302,18 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
                 print("🔍 Verifying final prices with all fees...")
                 verified_tickets = await self.verify_final_prices(filtered[:20])  # Limit to avoid rate limiting
             
+            # DISABLED: SeatGeek integration
+            # try:
+            #     print("🦊 Checking SeatGeek for Reserved Left/Center sections...")
+            #     seatgeek_tickets = await self.scrape_seatgeek_tickets()
+            #     if seatgeek_tickets:
+            #         verified_tickets.extend(seatgeek_tickets)
+            #         print(f"🎫 Added {len(seatgeek_tickets)} SeatGeek tickets to results")
+            #     else:
+            #         print("🦊 SeatGeek: No target section tickets found")
+            # except Exception as e:
+            #     print(f"🦊 SeatGeek integration error: {e}")
+            
             return verified_tickets
             
         except Exception as e:
@@ -148,9 +357,12 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
                     continue
                 
                 try:
+                    # Use sanitized URL for cleaner navigation and validation
+                    clean_url = self.sanitize_checkout_url(deeplink)
                     page = await context.new_page()
                     print(f"   🔍 Navigating to {seller} page for verification...")
-                    await page.goto(deeplink, wait_until='domcontentloaded', timeout=20000)
+                    print(f"     Using clean URL: {clean_url[:80]}...")
+                    await page.goto(clean_url, wait_until='domcontentloaded', timeout=20000)
                     await page.wait_for_timeout(3000)
                     
                     # Extract FINAL price with fees
@@ -187,7 +399,7 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
                             'final_price': final_price,
                             'seatpick_price': seatpick_price,
                             'price_diff': price_diff,
-                            'checkout_link': deeplink,
+                            'checkout_link': clean_url,  # Use the clean URL we already sanitized
                             'accurate': accurate
                         })
                     else:
@@ -201,7 +413,7 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
                             'verified': False,
                             'final_price': seatpick_price,
                             'price_diff': 0,
-                            'checkout_link': deeplink,
+                            'checkout_link': clean_url,  # Use the clean URL
                             'accurate': True
                         })
                     
@@ -219,7 +431,7 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
                         'verified': False,
                         'final_price': seatpick_price,
                         'price_diff': 0,
-                        'checkout_link': deeplink,
+                        'checkout_link': self.sanitize_checkout_url(deeplink),  # Sanitize on error
                         'accurate': True
                     })
                     try:
@@ -232,6 +444,201 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
             await browser.close()
         
         return verified
+    
+    async def scrape_seatgeek_tickets(self):
+        """Scrape SeatGeek using Camoufox for Reserved Left/Center sections"""
+        verified_tickets = []
+        
+        try:
+            event_url = "https://seatgeek.com/atmosphere-tickets/morrison-colorado-red-rocks-amphitheatre-2025-09-19-6-pm/concert/17445672?quantity=2"
+            
+            # Use Camoufox which worked better than rebrowser-playwright
+            async with AsyncCamoufox() as browser:
+                
+                page = await browser.new_page()
+                api_data = None
+                
+                # Set up response interception to capture API data
+                async def handle_response(response):
+                    nonlocal api_data
+                    url = response.url
+                    
+                    if 'event_listings_v2' in url:
+                        print(f"🎯 SeatGeek API call: {response.status} - {url[:80]}...")
+                        
+                        if response.status == 200:
+                            try:
+                                data = await response.json()
+                                api_data = data
+                                print("✅ SeatGeek: API data captured successfully")
+                            except:
+                                pass  # Ignore JSON parse errors
+                        elif response.status == 403:
+                            try:
+                                # Check if this is the interactive DataDome challenge
+                                text = await response.text()
+                                if "'rt':'i'" in text and 'captcha-delivery.com' in text:
+                                    print("🛡️  SeatGeek: Got interactive DataDome challenge - solving...")
+                                    # This is the solvable interactive challenge
+                                    # Wait for the challenge to potentially resolve
+                                    await page.wait_for_timeout(3000)
+                                    
+                                    # Let the challenge resolve naturally without reloading
+                                    print("⏳ Letting interactive challenge resolve naturally...")
+                                else:
+                                    print("❌ SeatGeek: Hard blocked by DataDome")
+                            except:
+                                pass
+                
+                page.on('response', handle_response)
+                
+                print("🦊 SeatGeek: Loading event page...")
+                try:
+                    # Set viewport like successful tests
+                    await page.set_viewport_size({"width": 1920, "height": 1080})
+                    
+                    # Navigate with longer timeout for challenge resolution
+                    response = await page.goto(event_url, timeout=60000)
+                    print(f"📊 SeatGeek response: {response.status if response else 'None'}")
+                    
+                    # Human-like interaction immediately after load
+                    try:
+                        await page.mouse.move(200, 200)
+                        await asyncio.sleep(1)
+                        await page.mouse.move(300, 300)
+                        await asyncio.sleep(0.5)
+                    except:
+                        pass
+                    
+                    # Wait for page to fully settle and challenges to resolve
+                    print("🛡️  Waiting for challenges to resolve...")
+                    await asyncio.sleep(15)  # Give time for interactive challenge resolution
+                    
+                    # Try additional interactions to trigger API calls
+                    try:
+                        await page.mouse.wheel(0, 300)
+                        await asyncio.sleep(2)
+                        
+                        # Try clicking interactive elements
+                        buttons = await page.query_selector_all('button, [role="button"]')
+                        for i, button in enumerate(buttons[:2]):
+                            try:
+                                await button.click()
+                                await asyncio.sleep(1)
+                            except:
+                                pass
+                    except:
+                        pass
+                    
+                    # Final wait for any triggered API calls
+                    await asyncio.sleep(5)
+                    
+                    # Check if we got data
+                    if api_data and isinstance(api_data, dict):
+                        print("🎯 SeatGeek: Processing captured API data...")
+                        tickets = self.parse_seatgeek_data(api_data)
+                        return tickets
+                    else:
+                        print("❌ SeatGeek: No API data captured")
+                        return []
+                        
+                except Exception as e:
+                    if "timeout" in str(e).lower():
+                        print("⚠️  SeatGeek: Page timeout (likely DataDome challenge)")
+                        # Still check if we got API data during the load
+                        if api_data:
+                            tickets = self.parse_seatgeek_data(api_data)
+                            return tickets
+                    else:
+                        print(f"❌ SeatGeek navigation error: {e}")
+                    return []
+                    
+        except Exception as e:
+            print(f"❌ SeatGeek scraping error: {e}")
+            return []
+    
+    def parse_seatgeek_data(self, api_data):
+        """Parse SeatGeek API data for Reserved Left/Center sections"""
+        verified_tickets = []
+        target_sections = ["Reserved Left", "Reserved Center"]
+        
+        try:
+            # Find listings in the API response
+            listings = []
+            if 'listings' in api_data:
+                listings = api_data['listings']
+            elif 'data' in api_data and isinstance(api_data['data'], list):
+                listings = api_data['data']
+            elif isinstance(api_data, list):
+                listings = api_data
+                
+            print(f"🎫 SeatGeek: Found {len(listings)} total listings")
+            
+            for listing in listings:
+                if not isinstance(listing, dict):
+                    continue
+                    
+                # Extract section information
+                section_name = ""
+                for key in ['section', 'section_name', 'zone', 'area']:
+                    if key in listing and listing[key]:
+                        section_name = str(listing[key])
+                        break
+                
+                # Only include Reserved Left and Reserved Center
+                if not any(target in section_name for target in target_sections):
+                    continue
+                
+                # Extract ticket details
+                quantity = listing.get('quantity', 1)
+                if quantity < 2:
+                    continue  # Need at least 2 tickets together
+                
+                price = listing.get('price')
+                if not price:
+                    price_data = listing.get('price_data', {})
+                    price = price_data.get('total') or price_data.get('amount')
+                
+                if not price:
+                    continue
+                    
+                # Convert price to float
+                try:
+                    if isinstance(price, str):
+                        price = float(re.sub(r'[^\d.]', '', price))
+                    else:
+                        price = float(price)
+                except:
+                    continue
+                
+                # Extract row info
+                row = listing.get('row', 'General')
+                if isinstance(row, dict):
+                    row = row.get('name', 'General')
+                
+                # Create verified ticket entry
+                verified_ticket = {
+                    'section': section_name,
+                    'row': str(row),
+                    'price': price,
+                    'seller': 'SeatGeek',
+                    'verified': True,  # API data is considered verified
+                    'final_price': price,
+                    'seatpick_price': price,
+                    'price_diff': 0,
+                    'checkout_link': f"https://seatgeek.com/checkout?listing_id={listing.get('id', '')}&quantity=2",
+                    'accurate': True
+                }
+                
+                verified_tickets.append(verified_ticket)
+                print(f"   ✅ SeatGeek: {section_name} Row {row} - ${price}")
+                
+            print(f"🎯 SeatGeek: Found {len(verified_tickets)} target section tickets")
+            return verified_tickets
+            
+        except Exception as e:
+            print(f"❌ Error parsing SeatGeek data: {e}")
+            return []
     
     async def extract_final_price(self, page, seller):
         """Extract the FINAL price including all fees from checkout page"""
@@ -556,7 +963,7 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
             print("No premium tickets found")
             return
         
-        # STRICT filtering - ONLY verified prices
+        # Collect test tickets for manual testing (won't auto-send)
         test_tickets = []
         for t in tickets:
             # Must be verified to be included
@@ -568,9 +975,9 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
             
             if final_price < 400:
                 test_tickets.append(t)
-                print(f"   ✅ Including verified test notification: {t['section']} final=${final_price} via {t['seller']}")
+                print(f"   ✅ Found test-range ticket: {t['section']} final=${final_price} via {t['seller']}")
             else:
-                print(f"   🚫 Verified but too expensive for test: {t['section']} final=${final_price} via {t['seller']}")
+                print(f"   🚫 Verified but too expensive: {t['section']} final=${final_price} via {t['seller']}")
         
         # STRICT urgent alerts - ONLY verified prices under $300
         immediate_tickets = []
@@ -589,25 +996,12 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
                 print(f"   📊 Verified but not urgent: {t['section']} final=${final_price} via {t['seller']}")
         
         print(f"📊 Found {len(tickets)} premium tickets")
-        print(f"📧 Test range (<$400): {len(test_tickets)} tickets")  
+        print(f"📧 Test range (<$400): {len(test_tickets)} tickets")
         print(f"🚨 Alert range (<$300): {len(immediate_tickets)} tickets")
         
-        # Always send test notification if we have premium tickets under $400
-        if test_tickets:
-            subject = self.generate_dynamic_subject(test_tickets, 400, "test")
-            
-            body_html = f"""
-            <h1>🧪 TEST NOTIFICATION - Premium Tickets Found</h1>
-            <p><strong>Found {len(test_tickets)} premium tickets under $400</strong></p>
-            {self.format_tickets_html_premium(test_tickets, "Premium Tickets Under $400")}
-            <p><a href="{self.url}">🎫 View all tickets on SeatPick</a></p>
-            <p><em>This is a test notification - checked at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</em></p>
-            """
-            
-            body_text = f"TEST: Found {len(test_tickets)} premium tickets under $400 for Atmosphere Morrison. Prices: " + ", ".join([f"{t['section']} ${t['price']}" for t in test_tickets[:5]])
-            
-            self.send_notifications(subject, body_html, body_text)
-            print(f"📧 Test notification sent for {len(test_tickets)} tickets under $400")
+        # TEST NOTIFICATIONS COMPLETELY DISABLED
+        # Test notifications will never be sent automatically
+        print(f"ℹ️  Test notifications are disabled - found {len(test_tickets)} tickets in test range but not sending notifications")
         
         # Send immediate alert if we have tickets under $300
         if immediate_tickets:
@@ -626,8 +1020,8 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
             self.send_notifications(subject, body_html, body_text)
             print(f"🚨 URGENT alert sent for {len(immediate_tickets)} tickets under $300")
         
-        if not test_tickets and not immediate_tickets:
-            print("No premium tickets under $400 found")
+        if not immediate_tickets:
+            print("No urgent alerts sent (no tickets under $300)")
     
     async def send_daily_summary(self):
         """Daily summary of all premium tickets under $400 with section sorting"""
@@ -729,11 +1123,21 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
         print(f"📧 Daily summary sent: {len(summary_tickets) if summary_tickets else 0} premium tickets")
 
 async def main():
-    """Main function to run the premium monitor"""
+    """Main function to run the premium monitor
+    
+    Usage:
+        python3 premium_monitor.py          # Normal run (only sends urgent alerts <$300)
+        python3 premium_monitor.py daily    # Daily summary
+    """
     monitor = PremiumSeatPickMonitor()
     
-    if len(sys.argv) > 1 and sys.argv[1] == "daily":
-        await monitor.send_daily_summary()
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "daily":
+            await monitor.send_daily_summary()
+        else:
+            print(f"Unknown argument: {sys.argv[1]}")
+            print("Usage: python3 premium_monitor.py [daily]")
+            print("Note: Test notifications are permanently disabled")
     else:
         await monitor.check_for_alerts()
 
