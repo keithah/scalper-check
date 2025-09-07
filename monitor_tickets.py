@@ -35,7 +35,7 @@ class SeatPickMonitor:
         self.simplepush_key = os.environ.get('SIMPLEPUSH_KEY')
         
         # Choose notification method preference
-        self.use_mailersend = bool(self.mailersend_api_key and self.mailersend_api_key.startswith('mlsn.'))
+        self.use_mailersend = bool(self.mailersend_api_key and len(self.mailersend_api_key) > 20)
         self.use_simplepush = bool(self.simplepush_key and simplepush_send)
         
     def scrape_tickets(self):
