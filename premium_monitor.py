@@ -49,10 +49,22 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
                         
                     data = await response.json()
             
-            # Filter for desired sections only (NO GA)
+            # Filter for desired sections only (NO GA) and quantity >= 2
             filtered = []
             for listing in data.get('listings', []):
                 if listing.get('section') not in self.desired_sections:
+                    continue
+                
+                # Check if exactly 2 tickets are available TOGETHER (no splits)
+                quantity = listing.get('quantity', 1)
+                splits = listing.get('splits', [])
+                
+                # Must be able to buy 2 tickets together
+                # This means either quantity >= 2 AND (no splits OR splits contains 2)
+                can_buy_two_together = quantity >= 2 and (not splits or 2 in splits or max(splits) >= 2)
+                
+                if not can_buy_two_together:
+                    print(f"   Skipping {listing.get('section')} ${listing.get('price')} - quantity: {quantity}, splits: {splits} (need 2 together)")
                     continue
                     
                 filtered.append({
@@ -61,6 +73,8 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
                     'price': listing.get('price', 0),
                     'seller': listing.get('seller', ''),
                     'deepLink': listing.get('deepLink', ''),
+                    'quantity': quantity,
+                    'splits': splits,
                     'verified': False,
                     'final_price': None,
                     'price_diff': None
@@ -125,6 +139,11 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
                     final_price = await self.extract_final_price(page, seller)
                     
                     print(f"   Price extraction result: SeatPick=${seatpick_price}, Final=${final_price}")
+                    
+                    # Reject extracted price if it's suspiciously lower than SeatPick price
+                    if final_price and final_price < (seatpick_price * 0.5):
+                        print(f"   ⚠️  Rejecting suspiciously low final price ${final_price} vs SeatPick ${seatpick_price}")
+                        final_price = None
                     
                     if final_price:
                         price_diff = final_price - seatpick_price
@@ -216,18 +235,51 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
                         # Return the highest price that's not suspiciously low
                         return max(reasonable_prices)
             
-            # Viagogo specific extraction
-            elif 'vgg' in seller or 'viagogo' in seller.lower():
-                # Look for total price patterns
-                matches = re.findall(r'(?:Total|total).*?\$(\d+(?:\.\d{2})?)', content)
-                if matches:
-                    return float(matches[0])
-                    
-                # Fallback to highest price
+            # TicketNetwork specific extraction  
+            elif 'tn' in seller.lower() or 'ticketnetwork' in seller.lower():
+                # Look for final checkout total
+                patterns = [
+                    r'(?:Order Total|Total|Final Total|Grand Total).*?\$(\d+(?:\.\d{2})?)',
+                    r'\$(\d+(?:\.\d{2})?)\s*(?:Total|total|TOTAL)',
+                    r'(?:You Pay|Total Price).*?\$(\d+(?:\.\d{2})?)'
+                ]
+                
+                for pattern in patterns:
+                    matches = re.findall(pattern, content, re.IGNORECASE)
+                    if matches:
+                        price = float(matches[0])
+                        if price >= 200:  # TicketNetwork prices should be reasonable
+                            return price
+                
+                # Fallback: find highest reasonable price
                 matches = re.findall(r'\$(\d{3,4}(?:\.\d{2})?)', content)
                 if matches:
                     prices = [float(m) for m in matches]
-                    valid_prices = [p for p in prices if 200 <= p <= 1000]
+                    valid_prices = [p for p in prices if 400 <= p <= 2000]  # Higher range for TicketNetwork
+                    if valid_prices:
+                        return max(valid_prices)
+            
+            # Viagogo specific extraction
+            elif 'vgg' in seller.lower() or 'viagogo' in seller.lower() or 'te' in seller.lower():
+                # Look for total price patterns
+                patterns = [
+                    r'(?:Total|total).*?\$(\d+(?:\.\d{2})?)',
+                    r'(?:You Pay|Final Price).*?\$(\d+(?:\.\d{2})?)',
+                    r'\$(\d+(?:\.\d{2})?)\s*(?:total|Total)'
+                ]
+                
+                for pattern in patterns:
+                    matches = re.findall(pattern, content, re.IGNORECASE)
+                    if matches:
+                        price = float(matches[0])
+                        if price >= 200:  # Reasonable minimum
+                            return price
+                    
+                # Fallback to highest reasonable price
+                matches = re.findall(r'\$(\d{2,4}(?:\.\d{2})?)', content)
+                if matches:
+                    prices = [float(m) for m in matches]
+                    valid_prices = [p for p in prices if 250 <= p <= 1000]
                     if valid_prices:
                         return max(valid_prices)
             
@@ -318,6 +370,7 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
                 <th>Location</th>
                 <th>Section</th>
                 <th>Price</th>
+                <th>Qty</th>
                 <th>Seller</th>
                 <th>Verified</th>
                 <th>Buy Now</th>
@@ -340,7 +393,7 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
                 
                 html += f"""
                 <tr style="background-color: {color}; color: white; font-weight: bold;">
-                    <td colspan="6" style="text-align: center;">{category} Sections</td>
+                    <td colspan="7" style="text-align: center;">{category} Sections</td>
                 </tr>
                 """
                 current_category = category
@@ -361,6 +414,14 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
             # Debug logging for price issues
             print(f"   DEBUG: {ticket['section']} - price={ticket.get('price')}, final_price={ticket.get('final_price')}, display='{price_display}'")
             
+            # Quantity display
+            quantity_info = ticket.get('quantity', 1)
+            splits = ticket.get('splits', [])
+            if splits:
+                qty_display = f"{quantity_info} (can buy: {', '.join(map(str, splits))})"
+            else:
+                qty_display = str(quantity_info)
+            
             # Buy button
             if ticket.get('checkout_link'):
                 buy_button = f'<a href="{ticket["checkout_link"]}" target="_blank" style="background-color: #27ae60; color: white; padding: 5px 10px; text-decoration: none; border-radius: 3px;">Buy Now</a>'
@@ -372,6 +433,7 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
                 <td style="font-weight: bold; color: {category_colors.get(category, '#95a5a6')};">{category}</td>
                 <td>{ticket['section']}</td>
                 <td style="font-weight: bold;">{price_display}</td>
+                <td style="text-align: center;">{qty_display}</td>
                 <td>{ticket['seller']}</td>
                 <td style="text-align: center;">{verification_icon}</td>
                 <td>{buy_button}</td>
