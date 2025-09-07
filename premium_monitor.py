@@ -55,18 +55,33 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
                 if listing.get('section') not in self.desired_sections:
                     continue
                 
-                # Check if exactly 2 tickets are available TOGETHER (no splits)
+                # STRICT REQUIREMENT: Must have exactly 2 tickets available together (side by side)
                 quantity = listing.get('quantity', 1)
                 splits = listing.get('splits', [])
                 
-                # Must be able to buy 2 tickets together
-                # This means quantity >= 2 AND either (no splits OR splits contains 2 or higher)
-                has_quantity = quantity >= 2
-                allows_two = not splits or any(s >= 2 for s in splits)
-                can_buy_two_together = has_quantity and allows_two
+                # Only accept if:
+                # 1. Quantity is at least 2 (can buy 2+ tickets)
+                # 2. Either no splits specified OR splits explicitly allows 2
+                # 3. We specifically want 2 tickets, not 1, not 3+ (unless they allow splits of 2)
+                has_two_available = quantity >= 2
+                
+                # Check if splits allow exactly 2 (or if no splits specified, assume ok)
+                if splits:
+                    # If splits are specified, 2 must be in the list
+                    allows_exactly_two = 2 in splits
+                else:
+                    # No splits specified means any quantity up to max is allowed
+                    allows_exactly_two = True
+                
+                can_buy_two_together = has_two_available and allows_exactly_two
                 
                 if not can_buy_two_together:
-                    print(f"   Skipping {listing.get('section')} ${listing.get('price')} - quantity: {quantity}, splits: {splits} (need 2 together)")
+                    print(f"   ❌ Skipping single ticket: {listing.get('section')} ${listing.get('price')} - qty:{quantity}, splits:{splits}")
+                    continue
+                
+                # Additional check: reject if quantity is 1 (single ticket only)
+                if quantity < 2:
+                    print(f"   ❌ Skipping single ticket only: {listing.get('section')} ${listing.get('price')}")
                     continue
                     
                 filtered.append({
@@ -280,26 +295,47 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
             # Viagogo specific extraction
             elif 'vgg' in seller.lower() or 'viagogo' in seller.lower() or 'te' in seller.lower():
                 print(f"      Extracting from Viagogo/Events365 page...")
+                # Debug: Show a sample of the page content to understand what we're parsing
+                if len(content) > 500:
+                    print(f"      DEBUG: Viagogo page sample: {content[200:500]}...")
                 
                 # Much more conservative Viagogo patterns - only look for clear checkout totals
                 patterns = [
+                    # Critical patterns for Viagogo's "1 x US$ 396" format
+                    r'1\s*x\s*US\$\s*(\d{3,4})',  # Matches "1 x US$ 396"
+                    r'2\s*x\s*US\$\s*(\d{3,4})',  # Matches "2 x US$ 396"
+                    r'(\d+)\s*x\s*US\$\s*(\d{3,4})',  # Matches "N x US$ 396"
+                    r'US\$\s*(\d{3,4}(?:\.\d{2})?)',  # Generic US dollar amounts
+                    # Original patterns for other checkout formats
                     r'(?:Order Total|ORDER TOTAL|Grand Total|GRAND TOTAL)[\s\:]*\$(\d{3,4}(?:\.\d{2})?)',
                     r'(?:Total Cost|TOTAL COST|Total Price|TOTAL PRICE)[\s\:]*\$(\d{3,4}(?:\.\d{2})?)',
                     r'(?:You Pay|You pay|YOU PAY)[\s\:]*\$(\d{3,4}(?:\.\d{2})?)',
-                    r'(?:Amount Due|AMOUNT DUE|Final Amount|FINAL AMOUNT)[\s\:]*\$(\d{3,4}(?:\.\d{2})?)'
+                    r'(?:Amount Due|AMOUNT DUE|Final Amount|FINAL AMOUNT)[\s\:]*\$(\d{3,4}(?:\.\d{2})?)',
+                    # Additional pattern for order summary
+                    r'Order summary[\s\S]*?US\$\s*(\d{3,4})'
                 ]
                 
                 for i, pattern in enumerate(patterns):
                     matches = re.findall(pattern, content, re.IGNORECASE)
                     if matches:
                         for match in matches:
-                            price = float(match)
-                            print(f"      Viagogo pattern {i+1} found: ${price}")
-                            # Much more conservative price range - Viagogo premiums should be $400+
-                            if 400 <= price <= 1000:
-                                return price
-                            elif price < 400:
-                                print(f"      Rejecting Viagogo price ${price} - too low for premium tickets")
+                            # Handle both single group and multi-group patterns
+                            if isinstance(match, tuple):
+                                # For patterns like "N x US$ 396", take the last group (price)
+                                price_str = match[-1] if match[-1] else match[0]
+                            else:
+                                price_str = match
+                            
+                            try:
+                                price = float(price_str)
+                                print(f"      Viagogo pattern {i+1} found: ${price}")
+                                # Accept prices from $300-$1000 for Viagogo (they add ~35% fees)
+                                if 300 <= price <= 1000:
+                                    return price
+                                else:
+                                    print(f"      Rejecting Viagogo price ${price} - outside expected range")
+                            except (ValueError, TypeError):
+                                continue
                 
                 # NO fallback patterns - if we can't find a clear total, don't guess
                 print(f"      No reliable Viagogo checkout total found - using SeatPick price")
@@ -387,15 +423,16 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
         
         html = f"""
         <h2>{title}</h2>
+        <p style="color: #2c3e50; font-weight: bold;">💺 All prices shown are per ticket. You will be purchasing 2 tickets together (side by side).</p>
         <table border="1" cellpadding="5" cellspacing="0" style="border-collapse: collapse; width: 100%;">
             <tr style="background-color: #2c3e50; color: white;">
                 <th>Location</th>
                 <th>Section</th>
-                <th>Price</th>
-                <th>Qty</th>
+                <th>Price/Ticket</th>
+                <th>Total (2 tix)</th>
                 <th>Seller</th>
                 <th>Verified</th>
-                <th>Buy Now</th>
+                <th>Buy 2 Tickets</th>
             </tr>
         """
         
@@ -424,29 +461,27 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
             if ticket.get('verified') and ticket.get('final_price'):
                 if ticket.get('accurate', True):
                     verification_icon = "✅"
-                    price_display = f"${ticket['final_price']:.0f}"
+                    price_per_ticket = ticket['final_price']
+                    price_display = f"${price_per_ticket:.0f}"
+                    total_display = f"${price_per_ticket * 2:.0f}"
                 else:
                     verification_icon = "⚠️"
                     seatpick_price = ticket.get('seatpick_price', ticket['price'])
-                    price_display = f"${ticket['final_price']:.0f} (listed: ${seatpick_price:.0f})"
+                    price_per_ticket = ticket['final_price']
+                    price_display = f"${price_per_ticket:.0f}"
+                    total_display = f"${price_per_ticket * 2:.0f}"
             else:
                 verification_icon = "❓"
-                price_display = f"${ticket['price']:.0f}"
+                price_per_ticket = ticket['price']
+                price_display = f"${price_per_ticket:.0f}"
+                total_display = f"${price_per_ticket * 2:.0f}"
             
             # Debug logging for price issues
-            print(f"   DEBUG: {ticket['section']} - price={ticket.get('price')}, final_price={ticket.get('final_price')}, display='{price_display}'")
+            print(f"   DEBUG: {ticket['section']} - price={ticket.get('price')}, final_price={ticket.get('final_price')}, per_ticket={price_per_ticket}, total_for_2={price_per_ticket * 2}")
             
-            # Quantity display
-            quantity_info = ticket.get('quantity', 1)
-            splits = ticket.get('splits', [])
-            if splits:
-                qty_display = f"{quantity_info} (can buy: {', '.join(map(str, splits))})"
-            else:
-                qty_display = str(quantity_info)
-            
-            # Buy button
+            # Buy button - updated text to be clear about buying 2 tickets
             if ticket.get('checkout_link'):
-                buy_button = f'<a href="{ticket["checkout_link"]}" target="_blank" style="background-color: #27ae60; color: white; padding: 5px 10px; text-decoration: none; border-radius: 3px;">Buy Now</a>'
+                buy_button = f'<a href="{ticket["checkout_link"]}" target="_blank" style="background-color: #27ae60; color: white; padding: 5px 10px; text-decoration: none; border-radius: 3px;">Buy 2 Tickets</a>'
             else:
                 buy_button = f'<a href="{self.url}" target="_blank" style="background-color: #3498db; color: white; padding: 5px 10px; text-decoration: none; border-radius: 3px;">View on SeatPick</a>'
             
@@ -455,7 +490,7 @@ class PremiumSeatPickMonitor(SeatPickMonitor):
                 <td style="font-weight: bold; color: {category_colors.get(category, '#95a5a6')};">{category}</td>
                 <td>{ticket['section']}</td>
                 <td style="font-weight: bold;">{price_display}</td>
-                <td style="text-align: center;">{qty_display}</td>
+                <td style="font-weight: bold; color: #e74c3c;">{total_display}</td>
                 <td>{ticket['seller']}</td>
                 <td style="text-align: center;">{verification_icon}</td>
                 <td>{buy_button}</td>
